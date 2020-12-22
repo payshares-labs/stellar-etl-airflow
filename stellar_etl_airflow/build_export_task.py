@@ -6,8 +6,6 @@ import json
 from airflow import AirflowException
 from airflow.models import Variable 
 
-from airflow.contrib.operators.kubernetes_pod_operator import KubernetesPodOperator 
-
 def get_path_variables():
     '''
         Returns the image output path, core executable path, and core config path.
@@ -47,7 +45,15 @@ def generate_etl_cmd(command, base_filename, cmd_type):
 
     # These are JINJA templates, which are filled by airflow at runtime. The json from get_ledger_range_from_times is pulled from XCOM. 
     start_ledger = '{{ ti.xcom_pull(task_ids="get_ledger_range_from_times")["start"] }}'
-    end_ledger = '{{ ti.xcom_pull(task_ids="get_ledger_range_from_times")["end"] }}'
+    end_ledger = '{{ ti.xcom_pull(task_ids="get_ledger_range_from_times")["end"]}}'
+
+    '''
+    For history archives, the start time of the next 5 minute interval is the same as the end time of the current interval, leading to a 1 ledger overlap.
+    We need to subtract 1 ledger from the end so that there is no overlap. However, sometimes the start ledger equals the end ledger. 
+    By setting the end=max(start, end-1), we ensure every range is valid.
+    '''
+    if cmd_type == 'archive':
+        end_ledger = '{{ [ti.xcom_pull(task_ids="get_ledger_range_from_times")["end"]-1, ti.xcom_pull(task_ids="get_ledger_range_from_times")["start"]] | max}}'
 
     image_output_path, core_exec, core_cfg = get_path_variables()
 
@@ -81,6 +87,7 @@ def build_kubernetes_pod_exporter(dag, command, etl_cmd_string, output_file):
     '''
     from airflow.kubernetes.volume import Volume
     from airflow.kubernetes.volume_mount import VolumeMount
+    from stellar_etl_airflow.kubernetes_pod_operator import KubernetesPodOperator
 
     data_mount = VolumeMount(Variable.get('volume_name'), Variable.get("image_output_path"), '', False)
     volume_config = Variable.get('volume_config', deserialize_json=True)
@@ -102,6 +109,7 @@ def build_kubernetes_pod_exporter(dag, command, etl_cmd_string, output_file):
         arguments=args,
         dag=dag,
         do_xcom_push=True,
+        sidecar_xcom_image=Variable.get('kubernetes_sidecar_image'),
         is_delete_operator_pod=True,
         in_cluster=in_cluster,
         config_file=config_file_location,
